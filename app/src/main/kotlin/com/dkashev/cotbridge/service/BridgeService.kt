@@ -25,7 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import org.meshtastic.proto.ATAKProtos
+import org.meshtastic.proto.TAKPacket
 
 class BridgeService : Service() {
 
@@ -134,7 +134,7 @@ class BridgeService : Service() {
     }
 
     /** Пришло из меша — конвертим в CoT XML и шлём в ATAK через UDP 4242. */
-    private fun onMeshPacket(packet: ATAKProtos.TAKPacket) {
+    private fun onMeshPacket(packet: TAKPacket) {
         BridgeStateHolder.update { it.copy(rxFromMesh = it.rxFromMesh + 1) }
         val xml = AtakPacketConverter.takPacketToCot(packet) ?: return
         val key = keyOf(xml) ?: return

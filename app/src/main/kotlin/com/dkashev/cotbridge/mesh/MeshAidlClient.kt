@@ -12,18 +12,18 @@ import okio.ByteString.Companion.toByteString
 import org.meshtastic.core.api.MeshtasticIntent
 import org.meshtastic.core.model.DataPacket
 import org.meshtastic.core.service.IMeshService
-import org.meshtastic.proto.ATAKProtos
-import org.meshtastic.proto.Portnums
+import org.meshtastic.proto.PortNum
+import org.meshtastic.proto.TAKPacket
 
 /**
  * Тонкая обёртка над bound service `com.geeksville.mesh.service.MeshService` из приложения
- * Meshtastic Android. Транслирует TX [ATAKProtos.TAKPacket] → меш, RX → callback.
+ * Meshtastic Android. Транслирует TX [TAKPacket] → меш, RX → callback.
  *
  * Использует deprecated AIDL, который Meshtastic v2.7.13 ещё поддерживает.
  */
 class MeshAidlClient(
     private val context: Context,
-    private val onPacketReceived: (ATAKProtos.TAKPacket) -> Unit,
+    private val onPacketReceived: (TAKPacket) -> Unit,
     private val onConnected: () -> Unit,
     private val onDisconnected: () -> Unit,
 ) {
@@ -52,7 +52,7 @@ class MeshAidlClient(
                 MeshtasticIntent.EXTRA_PAYLOAD, DataPacket::class.java
             ) ?: return
             val bytes = packet.bytes?.toByteArray() ?: return
-            val tak = try { ATAKProtos.TAKPacket.parseFrom(bytes) } catch (_: Throwable) { return }
+            val tak = try { TAKPacket.ADAPTER.decode(bytes) } catch (_: Throwable) { return }
             onPacketReceived(tak)
         }
     }
@@ -89,12 +89,12 @@ class MeshAidlClient(
     }
 
     /** Отправить TAKPacket в меш на broadcast-адрес (всем в канале 0). */
-    fun send(packet: ATAKProtos.TAKPacket): Boolean {
+    fun send(packet: TAKPacket): Boolean {
         val svc = service ?: return false
         val data = DataPacket(
             to = DataPacket.ID_BROADCAST,
-            bytes = packet.toByteArray().toByteString(),
-            dataType = Portnums.PortNum.ATAK_PLUGIN_VALUE,
+            bytes = packet.encode().toByteString(),
+            dataType = PortNum.ATAK_PLUGIN.value,
         ).apply {
             channel = 0
             wantAck = false
