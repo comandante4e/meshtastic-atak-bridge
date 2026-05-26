@@ -54,7 +54,11 @@ jobs:
 
       - name: Create Release on tag
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*.apk
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          gh release create "$TAG" artifacts/*.apk \
+            --title "$TAG" \
+            --generate-notes \
+            --repo "$GITHUB_REPOSITORY"
