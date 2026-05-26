@@ -1,5 +1,8 @@
 package com.dkashev.cotbridge.ui
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,7 +19,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -25,6 +31,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -40,6 +47,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dkashev.cotbridge.BridgeApp
@@ -48,7 +56,9 @@ import com.dkashev.cotbridge.bridge.BridgeStateHolder
 import com.dkashev.cotbridge.bridge.ConnectionState
 import com.dkashev.cotbridge.service.BridgeService
 import com.dkashev.cotbridge.settings.BridgeConfig
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,6 +69,15 @@ fun MainScreen() {
         val state by BridgeStateHolder.state.collectAsState()
         val cfg by BridgeApp.instance.preferences.config.collectAsState(initial = null)
 
+        var importUri by remember { mutableStateOf<Uri?>(null) }
+        var certs by remember { mutableStateOf(BridgeApp.instance.certVault.list()) }
+
+        val pickDataPackage = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            uri?.let { importUri = it }
+        }
+
         Scaffold(
             topBar = { TopAppBar(title = { Text("CoT Bridge — ATAK ↔ Meshtastic") }) },
         ) { padding ->
@@ -66,11 +85,28 @@ fun MainScreen() {
                 modifier = Modifier
                     .padding(padding)
                     .padding(16.dp)
-                    .fillMaxSize(),
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 StatusCard(state)
                 CountersCard(state)
+                CertsCard(
+                    state = state,
+                    certs = certs,
+                    onImport = {
+                        pickDataPackage.launch(arrayOf("application/zip", "application/*", "*/*"))
+                    },
+                    onRemove = { cs ->
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                BridgeApp.instance.certVault.remove(cs)
+                            }
+                            certs = BridgeApp.instance.certVault.list()
+                            BridgeStateHolder.log("Cert $cs удалён. Перезапусти мост чтобы освободить TLS-сессию.")
+                        }
+                    },
+                )
                 ConfigCard(
                     cfg = cfg,
                     onCfgChange = { transform ->
@@ -105,6 +141,18 @@ fun MainScreen() {
                 }
 
                 LogCard(state)
+            }
+
+            importUri?.let { uri ->
+                ImportDialog(
+                    uri = uri,
+                    onDismiss = { importUri = null },
+                    onImported = { added ->
+                        certs = certs + added
+                        importUri = null
+                        BridgeStateHolder.log("Импортирован cert: $added. Перезапусти мост чтобы поднять TLS-сессию.")
+                    },
+                )
             }
         }
     }
@@ -156,10 +204,131 @@ private fun CountersCard(state: BridgeState) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Счётчики", fontWeight = FontWeight.SemiBold)
             Text("ATAK → bridge: ${state.rxFromAtak}     bridge → меш: ${state.txToMesh}")
-            Text("меш → bridge: ${state.rxFromMesh}     bridge → ATAK: ${state.txToAtak}")
+            Text("меш → bridge: ${state.rxFromMesh}")
+            Text("bridge → URPC (под cert): ${state.txToUpstream}")
+            Text("bridge → ATAK (fallback маркер): ${state.txFallback}")
             Text("Эхо-фильтр: ${state.droppedLoop}", fontSize = 12.sp, color = Color.Gray)
         }
     }
+}
+
+@Composable
+private fun CertsCard(
+    state: BridgeState,
+    certs: List<String>,
+    onImport: () -> Unit,
+    onRemove: (String) -> Unit,
+) {
+    Card {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Серты мешевых юзеров (${certs.size})", fontWeight = FontWeight.SemiBold)
+            Text(
+                "Каждый юзер на базе делает enrollment в своём ATAK (login+pass → cert от URPC), " +
+                    "потом экспортит DataPackage (.zip) и передаёт тебе для импорта сюда.",
+                fontSize = 11.sp, color = Color.Gray,
+            )
+
+            if (certs.isEmpty()) {
+                Text(
+                    "Нет импортированных cert'ов. Без них мешевые юзеры пойдут на URPC как маркеры (u-d-p).",
+                    fontSize = 12.sp,
+                )
+            } else {
+                certs.forEach { cs ->
+                    val st = state.upstreams[cs] ?: ConnectionState.IDLE
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(modifier = Modifier.size(10.dp).background(st.color(), CircleShape))
+                        Spacer(Modifier.width(8.dp))
+                        Text(cs, modifier = Modifier.weight(1f))
+                        Text(st.label(), fontSize = 11.sp, color = Color.Gray)
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(onClick = { onRemove(cs) }) { Text("✕") }
+                    }
+                }
+            }
+
+            Button(onClick = onImport) { Text("Импорт DataPackage (.zip)") }
+        }
+    }
+}
+
+@Composable
+private fun ImportDialog(
+    uri: Uri,
+    onDismiss: () -> Unit,
+    onImported: (String) -> Unit,
+) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var password by remember { mutableStateOf("atakatak") }
+    var callsignOverride by remember { mutableStateOf("") }
+    var hostOverride by remember { mutableStateOf("") }
+    var portOverride by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Импорт DataPackage") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Файл: ${uri.lastPathSegment ?: uri}", fontSize = 11.sp)
+                OutlinedTextField(
+                    value = password, onValueChange = { password = it },
+                    label = { Text("Пароль .p12 (обычно atakatak)") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = callsignOverride, onValueChange = { callsignOverride = it },
+                    label = { Text("Callsign (пусто = из CN cert'а)") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = hostOverride, onValueChange = { hostOverride = it },
+                        label = { Text("URPC host (пусто = из pref)") },
+                        modifier = Modifier.weight(2f),
+                    )
+                    OutlinedTextField(
+                        value = portOverride, onValueChange = { portOverride = it.filter(Char::isDigit) },
+                        label = { Text("Port") },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !loading && password.isNotEmpty(),
+                onClick = {
+                    loading = true
+                    error = null
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                BridgeApp.instance.certVault.import(
+                                    sourceUri = uri,
+                                    password = password,
+                                    callsignOverride = callsignOverride.ifBlank { null },
+                                    hostOverride = hostOverride.ifBlank { null },
+                                    portOverride = portOverride.toIntOrNull(),
+                                )
+                            }
+                        }.onSuccess { onImported(it.callsign) }
+                            .onFailure {
+                                error = it.message ?: "Не удалось импортировать"
+                                loading = false
+                            }
+                    }
+                },
+            ) { Text(if (loading) "..." else "Импорт") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        },
+    )
 }
 
 @Composable
@@ -169,11 +338,19 @@ private fun ConfigCard(
 ) {
     Card {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Сеть (обычно менять не надо)", fontWeight = FontWeight.SemiBold)
+            Text("Сеть и идентификация", fontWeight = FontWeight.SemiBold)
             if (cfg == null) {
                 Text("Загружаю настройки...", fontSize = 12.sp)
                 return@Column
             }
+
+            var myCs by remember(cfg) { mutableStateOf(cfg.myCallsign) }
+            OutlinedTextField(
+                value = myCs,
+                onValueChange = { myCs = it; onCfgChange { c -> c.copy(myCallsign = myCs) } },
+                label = { Text("Мой callsign (для fallback-чата)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 var mc by remember(cfg) { mutableStateOf(cfg.multicastAddress) }

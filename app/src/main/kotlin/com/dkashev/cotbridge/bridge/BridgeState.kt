@@ -16,7 +16,10 @@ data class BridgeState(
     val txToMesh: Long = 0,
     val rxFromMesh: Long = 0,
     val txToAtak: Long = 0,
+    val txToUpstream: Long = 0,
+    val txFallback: Long = 0,
     val droppedLoop: Long = 0,
+    val upstreams: Map<String, ConnectionState> = emptyMap(),
     val log: List<LogEntry> = emptyList(),
     val lastError: String? = null,
 )

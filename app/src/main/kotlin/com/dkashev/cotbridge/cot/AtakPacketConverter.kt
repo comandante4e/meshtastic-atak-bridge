@@ -58,10 +58,11 @@ object AtakPacketConverter {
         }
     }
 
+    /** PLI/chat от мешевого юзера X — отправляется через cert юзера X (UID = MESH-X). */
     fun takPacketToCot(packet: TAKPacket): String? {
-        val callsign = packet.contact?.callsign?.ifEmpty { null } ?: "Mesh"
-        val teamName = packet.group?.team?.name?.replace("_", " ") ?: "Cyan"
-        val roleName = packet.group?.role?.let(::roleString) ?: "Team Member"
+        val callsign = packet.callsign()
+        val teamName = packet.teamName()
+        val roleName = packet.roleString()
         val now = Instant.now().toString()
         val stale = Instant.now().plusSeconds(STALE_SECONDS).toString()
 
@@ -77,19 +78,69 @@ object AtakPacketConverter {
                     """<detail><contact callsign="${esc(callsign)}"/><__group name="${esc(teamName)}" role="${esc(roleName)}"/>""" +
                     """<track speed="${pli.speed}" course="${pli.course}"/></detail></event>"""
             }
-            chat != null -> {
-                val message = chat.message
-                val toId = chat.to ?: "All Chat Rooms"
-                val toCallsign = chat.to_callsign ?: "All Chat Rooms"
-                val chatUid = "GeoChat.$callsign.${System.nanoTime()}"
-                """<event version="2.0" uid="${esc(chatUid)}" type="b-t-f" time="$now" start="$now" stale="$stale" how="h-g-i-g-o">""" +
-                    """<point lat="0" lon="0" hae="0" ce="9999999" le="9999999"/>""" +
-                    """<detail><__chat parent="RootContactGroup" groupOwner="false" chatroom="${esc(toCallsign)}" id="${esc(toId)}" senderCallsign="${esc(callsign)}"/>""" +
-                    """<remarks source="BAO.F.ATAK.${esc(callsign)}" time="$now" to="${esc(toId)}">${esc(message)}</remarks></detail></event>"""
-            }
+            chat != null -> chatCot(callsign, chat.message, chat.to, chat.to_callsign, now, stale)
             else -> null
         }
     }
+
+    /**
+     * Fallback для юзеров без cert'а: PLI конвертим в маркер `u-d-p` (User-Defined Point).
+     * URPC не ремапит UID маркеров — точки не прыгают и видны на карте под callsign'ом юзера.
+     * Минус: на URPC выглядит как маркер (флажок), не как иконка пользователя.
+     */
+    fun takPacketToMarkerCot(packet: TAKPacket): String? {
+        val pli = packet.pli ?: return null
+        val callsign = packet.callsign()
+        val lat = pli.latitude_i / COORD_SCALE
+        val lon = pli.longitude_i / COORD_SCALE
+        val uid = "MESH-MARKER-$callsign"
+        val now = Instant.now().toString()
+        val stale = Instant.now().plusSeconds(STALE_SECONDS * 2).toString()
+        return """<event version="2.0" uid="${esc(uid)}" type="u-d-p" time="$now" start="$now" stale="$stale" how="h-g-i-g-o">""" +
+            """<point lat="${"%.7f".format(Locale.US, lat)}" lon="${"%.7f".format(Locale.US, lon)}" hae="${pli.altitude}" ce="9999999" le="9999999"/>""" +
+            """<detail><contact callsign="${esc(callsign)}"/>""" +
+            """<remarks>mesh user (no cert) · speed=${pli.speed} crs=${pli.course}</remarks></detail></event>"""
+    }
+
+    /**
+     * Fallback-чат от юзера без cert'а: летит под моим аккаунтом, но с префиксом `[callsign]`,
+     * чтобы автор был виден в тексте.
+     */
+    fun takPacketToPrefixedChatCot(packet: TAKPacket, myCallsign: String): String? {
+        val chat = packet.chat ?: return null
+        val author = packet.callsign()
+        val now = Instant.now().toString()
+        val stale = Instant.now().plusSeconds(STALE_SECONDS).toString()
+        return chatCot(
+            sender = myCallsign,
+            message = "[$author] ${chat.message}",
+            to = chat.to,
+            toCallsign = chat.to_callsign,
+            now = now,
+            stale = stale,
+        )
+    }
+
+    private fun chatCot(
+        sender: String,
+        message: String,
+        to: String?,
+        toCallsign: String?,
+        now: String,
+        stale: String,
+    ): String {
+        val toId = to ?: "All Chat Rooms"
+        val toCs = toCallsign ?: "All Chat Rooms"
+        val chatUid = "GeoChat.$sender.${System.nanoTime()}"
+        return """<event version="2.0" uid="${esc(chatUid)}" type="b-t-f" time="$now" start="$now" stale="$stale" how="h-g-i-g-o">""" +
+            """<point lat="0" lon="0" hae="0" ce="9999999" le="9999999"/>""" +
+            """<detail><__chat parent="RootContactGroup" groupOwner="false" chatroom="${esc(toCs)}" id="${esc(toId)}" senderCallsign="${esc(sender)}"/>""" +
+            """<remarks source="BAO.F.ATAK.${esc(sender)}" time="$now" to="${esc(toId)}">${esc(message)}</remarks></detail></event>"""
+    }
+
+    fun TAKPacket.callsign(): String = contact?.callsign?.ifEmpty { null } ?: "Mesh"
+    private fun TAKPacket.teamName(): String = group?.team?.name?.replace("_", " ") ?: "Cyan"
+    private fun TAKPacket.roleString(): String = group?.role?.let(::roleString) ?: "Team Member"
 
     private fun isPliType(type: String) =
         type.startsWith("a-f-") || type.startsWith("a-h-") ||

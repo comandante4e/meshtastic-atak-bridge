@@ -16,6 +16,7 @@ data class BridgeConfig(
     val multicastAddress: String = "239.2.3.1",
     val multicastPort: Int = 6969,
     val atakInputPort: Int = 4242,
+    val myCallsign: String = "Bridge",
 )
 
 class PreferencesRepo(private val context: Context) {
@@ -30,6 +31,7 @@ class PreferencesRepo(private val context: Context) {
             p[KEY_MC_ADDR] = updated.multicastAddress
             p[KEY_MC_PORT] = updated.multicastPort
             p[KEY_INJECT_PORT] = updated.atakInputPort
+            p[KEY_MY_CALLSIGN] = updated.myCallsign
         }
     }
 
@@ -37,11 +39,13 @@ class PreferencesRepo(private val context: Context) {
         multicastAddress = p[KEY_MC_ADDR] ?: "239.2.3.1",
         multicastPort = p[KEY_MC_PORT] ?: 6969,
         atakInputPort = p[KEY_INJECT_PORT] ?: 4242,
+        myCallsign = p[KEY_MY_CALLSIGN] ?: "Bridge",
     )
 
     private companion object {
         val KEY_MC_ADDR = stringPreferencesKey("multicast_addr")
         val KEY_MC_PORT = intPreferencesKey("multicast_port")
         val KEY_INJECT_PORT = intPreferencesKey("atak_input_port")
+        val KEY_MY_CALLSIGN = stringPreferencesKey("my_callsign")
     }
 }
