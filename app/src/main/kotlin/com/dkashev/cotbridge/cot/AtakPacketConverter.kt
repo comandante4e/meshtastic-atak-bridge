@@ -139,6 +139,9 @@ object AtakPacketConverter {
             """<remarks source="BAO.F.ATAK.${esc(sender)}" time="$now" to="${esc(toId)}">${esc(message)}</remarks></detail></event>"""
     }
 
+    /** Callsign из `<contact callsign="...">` серверного CoT (для фильтра эха обратки). */
+    fun callsignFromCot(xml: String): String? = extractCallsign(xml)
+
     fun TAKPacket.callsign(): String = contact?.callsign?.ifEmpty { null } ?: "Mesh"
     private fun TAKPacket.teamName(): String = group?.team?.name?.replace("_", " ") ?: "Cyan"
     private fun TAKPacket.roleString(): String = group?.role?.let(::roleString) ?: "Team Member"

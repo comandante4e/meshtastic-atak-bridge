@@ -17,6 +17,8 @@ import com.dkashev.cotbridge.bridge.BridgeStateHolder
 import com.dkashev.cotbridge.bridge.ConnectionState
 import com.dkashev.cotbridge.bridge.ElectionCore
 import com.dkashev.cotbridge.bridge.GatewayElector
+import com.dkashev.cotbridge.bridge.ServerRelayMode
+import com.dkashev.cotbridge.bridge.TtlSet
 import com.dkashev.cotbridge.cot.AtakPacketConverter
 import com.dkashev.cotbridge.cot.AtakPacketConverter.callsign
 import com.dkashev.cotbridge.cot.CotXml
@@ -45,6 +47,10 @@ class BridgeService : Service() {
     private var elector: GatewayElector? = null
     private val loop = LoopDetector(capacity = 512)
     private var myCallsign: String = "Bridge"
+
+    /** Callsign'ы, что мы форвардим С меша НА URPC — для фильтра эха обратки (URPC ремапит uid). */
+    private val meshCallsigns = TtlSet(MESH_CALLSIGN_TTL_MS)
+    private var serverRelayMode: ServerRelayMode = ServerRelayMode.UPSTREAM_RX
 
     @Volatile private var bridgeUp = false
 
@@ -88,6 +94,7 @@ class BridgeService : Service() {
             try {
                 val cfg = BridgeApp.instance.preferences.current()
                 myCallsign = cfg.myCallsign
+                serverRelayMode = cfg.serverRelayMode
 
                 injector = AtakInjector(host = "127.0.0.1", port = cfg.atakInputPort)
                 BridgeStateHolder.log("Инжектор готов: UDP 127.0.0.1:${cfg.atakInputPort}")
@@ -133,7 +140,7 @@ class BridgeService : Service() {
                 BridgeStateHolder.log("Загружено ${entries.size} cert'ов из vault")
 
                 fleet = UpstreamFleet(
-                    onUpstreamEvent = { _, _ -> /* per-user RX игнорим — multicast handles broadcasts */ },
+                    onUpstreamEvent = { cs, cot -> onUpstreamCot(cs, cot) },
                     onClientConnected = { cs ->
                         BridgeStateHolder.update { it.copy(upstreams = it.upstreams + (cs to ConnectionState.CONNECTED)) }
                         BridgeStateHolder.log("URPC [$cs]: connected")
@@ -213,6 +220,9 @@ class BridgeService : Service() {
     /** ATAK → multicast 6969 → bridge → меш (входящие с URPC форвардим в меш). */
     private fun onAtakEvent(xml: String) {
         BridgeStateHolder.update { it.copy(rxFromAtak = it.rxFromAtak + 1) }
+        // Обратка через мультикаст — только в режиме MULTICAST. В UPSTREAM_RX её делает onUpstreamCot,
+        // а форвард отсюда дал бы дубль.
+        if (serverRelayMode != ServerRelayMode.MULTICAST) return
         if (elector?.active?.value != true) {
             BridgeStateHolder.update { it.copy(droppedStandby = it.droppedStandby + 1) }
             return
@@ -230,11 +240,13 @@ class BridgeService : Service() {
     /** Меш → bridge → (либо UpstreamFleet под cert юзера, либо fallback маркер через ATAK). */
     private fun onMeshPacket(packet: TAKPacket) {
         BridgeStateHolder.update { it.copy(rxFromMesh = it.rxFromMesh + 1) }
+        val callsign = packet.callsign()
+        // Помним мешевых даже в standby — пригодится фильтру эха обратки при промоуте в активные.
+        meshCallsigns.mark(callsign)
         if (elector?.active?.value != true) {
             BridgeStateHolder.update { it.copy(droppedStandby = it.droppedStandby + 1) }
             return
         }
-        val callsign = packet.callsign()
         val cot = AtakPacketConverter.takPacketToCot(packet) ?: return
         val key = keyOf(cot) ?: return
         if (loop.markAndCheck(key)) {
@@ -265,6 +277,28 @@ class BridgeService : Service() {
                 }
             }
         }
+    }
+
+    /**
+     * Обратка URPC → меш напрямую из RX per-cert TLS-стримов (режим UPSTREAM_RX).
+     * Не зависит от того, ретранслит ли ATAK серверный CoT в мультикаст.
+     */
+    private fun onUpstreamCot(certCallsign: String, xml: String) {
+        if (serverRelayMode != ServerRelayMode.UPSTREAM_RX) return
+        if (elector?.active?.value != true) return
+        // Один и тот же серверный broadcast приходит на все N cert-сокетов — схлопываем по uid|time.
+        val key = keyOf(xml) ?: return
+        if (loop.markAndCheck(key)) return
+        // Фильтр эха: URPC ремапит uid наших мешевых (MESH-X → SERVER-X), но callsign сохраняет.
+        // Событие с callsign'ом нашего мешевого юзера — это эхо, обратно в меш не гоним.
+        val cs = AtakPacketConverter.callsignFromCot(xml)
+        if (cs != null && meshCallsigns.contains(cs)) {
+            BridgeStateHolder.update { it.copy(droppedLoop = it.droppedLoop + 1) }
+            return
+        }
+        val tak = AtakPacketConverter.cotToTakPacket(xml) ?: return
+        val sent = mesh?.send(tak) ?: false
+        if (sent) BridgeStateHolder.update { it.copy(txToMesh = it.txToMesh + 1) }
     }
 
     private fun keyOf(xml: String): String? {
@@ -341,6 +375,9 @@ class BridgeService : Service() {
         // Маяк выборов раз в 30с; standby занимает вакансию, если не слышал активный маяк ~95с.
         private const val BEACON_INTERVAL_MS = 30_000L
         private const val BEACON_TIMEOUT_MS = 95_000L
+
+        // Сколько помним callsign мешевого юзера для фильтра эха обратки.
+        private const val MESH_CALLSIGN_TTL_MS = 10 * 60_000L
 
         fun start(ctx: Context) {
             val intent = Intent(ctx, BridgeService::class.java).setAction(ACTION_START)

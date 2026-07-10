@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.dkashev.cotbridge.bridge.GatewayRole
+import com.dkashev.cotbridge.bridge.ServerRelayMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -24,6 +25,8 @@ data class BridgeConfig(
     val gatewayPriority: Int = 100,
     /** Уникальный тайбрейкер на инсталляцию. 0 = ещё не сгенерирован (сервис проставит случайный). */
     val electionId: Int = 0,
+    /** Как гнать обратку URPC→меш. По умолчанию надёжный RX из UpstreamFleet. */
+    val serverRelayMode: ServerRelayMode = ServerRelayMode.UPSTREAM_RX,
 )
 
 class PreferencesRepo(private val context: Context) {
@@ -42,6 +45,7 @@ class PreferencesRepo(private val context: Context) {
             p[KEY_GW_ROLE] = updated.gatewayRole.name
             p[KEY_GW_PRIORITY] = updated.gatewayPriority
             p[KEY_ELECTION_ID] = updated.electionId
+            p[KEY_SERVER_RELAY] = updated.serverRelayMode.name
         }
     }
 
@@ -54,6 +58,8 @@ class PreferencesRepo(private val context: Context) {
             ?: GatewayRole.AUTO,
         gatewayPriority = p[KEY_GW_PRIORITY] ?: 100,
         electionId = p[KEY_ELECTION_ID] ?: 0,
+        serverRelayMode = p[KEY_SERVER_RELAY]?.let { runCatching { ServerRelayMode.valueOf(it) }.getOrNull() }
+            ?: ServerRelayMode.UPSTREAM_RX,
     )
 
     private companion object {
@@ -64,5 +70,6 @@ class PreferencesRepo(private val context: Context) {
         val KEY_GW_ROLE = stringPreferencesKey("gateway_role")
         val KEY_GW_PRIORITY = intPreferencesKey("gateway_priority")
         val KEY_ELECTION_ID = intPreferencesKey("election_id")
+        val KEY_SERVER_RELAY = stringPreferencesKey("server_relay_mode")
     }
 }

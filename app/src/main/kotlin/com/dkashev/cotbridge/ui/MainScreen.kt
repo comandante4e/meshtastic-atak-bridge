@@ -55,6 +55,7 @@ import com.dkashev.cotbridge.bridge.BridgeState
 import com.dkashev.cotbridge.bridge.BridgeStateHolder
 import com.dkashev.cotbridge.bridge.ConnectionState
 import com.dkashev.cotbridge.bridge.GatewayRole
+import com.dkashev.cotbridge.bridge.ServerRelayMode
 import com.dkashev.cotbridge.service.BridgeService
 import com.dkashev.cotbridge.settings.BridgeConfig
 import kotlinx.coroutines.Dispatchers
@@ -443,6 +444,26 @@ private fun ConfigCard(
                 },
                 label = { Text("UDP-порт Network Input у ATAK (по умолчанию 4242)") },
                 modifier = Modifier.fillMaxWidth(),
+            )
+
+            Text("Обратка URPC → меш", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ServerRelayMode.entries.forEach { m ->
+                    val selected = cfg.serverRelayMode == m
+                    Button(
+                        onClick = { onCfgChange { c -> c.copy(serverRelayMode = m) } },
+                        enabled = !selected,
+                        modifier = Modifier.weight(1f),
+                    ) { Text(if (m == ServerRelayMode.UPSTREAM_RX) "RX (cert)" else "Multicast") }
+                }
+            }
+            Text(
+                "RX — надёжно, напрямую из per-cert стримов (реком.). " +
+                    "Multicast — через ретрансляцию ATAK (запасной). Применяется при след. Старте.",
+                fontSize = 11.sp, color = Color.Gray,
             )
         }
     }
