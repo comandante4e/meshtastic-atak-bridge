@@ -48,6 +48,10 @@ class UpstreamFleet(
 
     fun hasCert(callsign: String): Boolean = clients.containsKey(callsign)
 
+    fun count(): Int = clients.size
+
+    fun anyConnected(): Boolean = clients.values.any { it.isConnected }
+
     fun statuses(): Map<String, Boolean> =
         clients.mapValues { it.value.isConnected }
 

@@ -54,6 +54,7 @@ import com.dkashev.cotbridge.BridgeApp
 import com.dkashev.cotbridge.bridge.BridgeState
 import com.dkashev.cotbridge.bridge.BridgeStateHolder
 import com.dkashev.cotbridge.bridge.ConnectionState
+import com.dkashev.cotbridge.bridge.GatewayRole
 import com.dkashev.cotbridge.service.BridgeService
 import com.dkashev.cotbridge.settings.BridgeConfig
 import kotlinx.coroutines.Dispatchers
@@ -105,6 +106,12 @@ fun MainScreen() {
                             certs = BridgeApp.instance.certVault.list()
                             BridgeStateHolder.log("Cert $cs удалён. Перезапусти мост чтобы освободить TLS-сессию.")
                         }
+                    },
+                )
+                GatewayCard(
+                    cfg = cfg,
+                    onCfgChange = { transform ->
+                        scope.launch { BridgeApp.instance.preferences.update(transform) }
                     },
                 )
                 ConfigCard(
@@ -170,6 +177,11 @@ private fun StatusCard(state: BridgeState) {
             )
             StatusRow("Multicast от ATAK", state.multicast.label(), state.multicast.color())
             StatusRow("Meshtastic AIDL", state.localTak.label(), state.localTak.color())
+            StatusRow(
+                "Шлюз (${state.gatewayRole})",
+                if (state.gatewayActive) "АКТИВНЫЙ" else "standby",
+                if (state.gatewayActive) Color(0xFF2E7D32) else Color(0xFFFFA000),
+            )
         }
     }
 }
@@ -208,6 +220,7 @@ private fun CountersCard(state: BridgeState) {
             Text("bridge → URPC (под cert): ${state.txToUpstream}")
             Text("bridge → ATAK (fallback маркер): ${state.txFallback}")
             Text("Эхо-фильтр: ${state.droppedLoop}", fontSize = 12.sp, color = Color.Gray)
+            Text("Пропущено (не активный шлюз): ${state.droppedStandby}", fontSize = 12.sp, color = Color.Gray)
         }
     }
 }
@@ -329,6 +342,55 @@ private fun ImportDialog(
             TextButton(onClick = onDismiss) { Text("Отмена") }
         },
     )
+}
+
+@Composable
+private fun GatewayCard(
+    cfg: BridgeConfig?,
+    onCfgChange: ((BridgeConfig) -> BridgeConfig) -> Unit,
+) {
+    Card {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Режим шлюза (анти-дубль)", fontWeight = FontWeight.SemiBold)
+            if (cfg == null) {
+                Text("Загружаю...", fontSize = 12.sp)
+                return@Column
+            }
+            Text(
+                "AUTO — выборы: ровно один активный шлюз в связном меше (безопасно раздавать друзьям). " +
+                    "FORCE — всегда я (единственный, без failover). OFF — не ретранслирую.",
+                fontSize = 11.sp, color = Color.Gray,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                GatewayRole.entries.forEach { r ->
+                    val selected = cfg.gatewayRole == r
+                    Button(
+                        onClick = { onCfgChange { c -> c.copy(gatewayRole = r) } },
+                        enabled = !selected,
+                        modifier = Modifier.weight(1f),
+                    ) { Text(r.name) }
+                }
+            }
+            var prio by remember(cfg) { mutableStateOf(cfg.gatewayPriority.toString()) }
+            OutlinedTextField(
+                value = prio,
+                onValueChange = {
+                    prio = it.filter(Char::isDigit)
+                    onCfgChange { c -> c.copy(gatewayPriority = prio.toIntOrNull() ?: 100) }
+                },
+                label = { Text("Приоритет выборов (меньше = главнее; 0 = предпочтительный шлюз)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "Смена роли/приоритета применяется при следующем Старте. " +
+                    "Для раздачи: у всех AUTO; у самого мощного шлюза priority=0.",
+                fontSize = 11.sp, color = Color.Gray,
+            )
+        }
+    }
 }
 
 @Composable

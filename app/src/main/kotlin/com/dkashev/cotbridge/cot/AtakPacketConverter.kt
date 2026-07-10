@@ -131,7 +131,8 @@ object AtakPacketConverter {
     ): String {
         val toId = to ?: "All Chat Rooms"
         val toCs = toCallsign ?: "All Chat Rooms"
-        val chatUid = "GeoChat.$sender.${System.nanoTime()}"
+        // Детерминированный UID вместо nanoTime — чтобы два шлюза не задвоили один чат на сервере.
+        val chatUid = ChatUid.of(sender, message, Instant.now().epochSecond)
         return """<event version="2.0" uid="${esc(chatUid)}" type="b-t-f" time="$now" start="$now" stale="$stale" how="h-g-i-g-o">""" +
             """<point lat="0" lon="0" hae="0" ce="9999999" le="9999999"/>""" +
             """<detail><__chat parent="RootContactGroup" groupOwner="false" chatroom="${esc(toCs)}" id="${esc(toId)}" senderCallsign="${esc(sender)}"/>""" +

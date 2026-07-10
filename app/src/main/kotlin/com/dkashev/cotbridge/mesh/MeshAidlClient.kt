@@ -24,12 +24,16 @@ import org.meshtastic.proto.TAKPacket
 class MeshAidlClient(
     private val context: Context,
     private val onPacketReceived: (TAKPacket) -> Unit,
+    private val onBeaconReceived: (ByteArray) -> Unit,
     private val onConnected: () -> Unit,
     private val onDisconnected: () -> Unit,
 ) {
 
     @Volatile private var service: IMeshService? = null
     @Volatile private var bound = false
+
+    /** Меш реально привязан (сервис жив). Используется предикатом capability выборов. */
+    val connected: Boolean get() = bound && service != null
 
     private val serviceConn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -45,31 +49,41 @@ class MeshAidlClient(
         }
     }
 
-    private val atakReceiver = object : BroadcastReceiver() {
+    private val meshReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
-            if (intent?.action != MeshtasticIntent.ACTION_RECEIVED_ATAK_PLUGIN) return
-            val packet = intent.getParcelableExtraCompat(
+            val packet = intent?.getParcelableExtraCompat(
                 MeshtasticIntent.EXTRA_PAYLOAD, DataPacket::class.java
             ) ?: return
             val bytes = packet.bytes?.toByteArray() ?: return
-            val tak = try { TAKPacket.ADAPTER.decode(bytes) } catch (_: Throwable) { return }
-            onPacketReceived(tak)
+            when (intent.action) {
+                MeshtasticIntent.ACTION_RECEIVED_ATAK_PLUGIN -> {
+                    val tak = try { TAKPacket.ADAPTER.decode(bytes) } catch (_: Throwable) { return }
+                    onPacketReceived(tak)
+                }
+                // Маяки выборов на отдельном портнуме — официальный ATAK-плагин их не трогает.
+                MeshtasticIntent.ACTION_RECEIVED_PRIVATE_APP -> onBeaconReceived(bytes)
+            }
         }
     }
 
     fun start() {
-        val filter = IntentFilter(MeshtasticIntent.ACTION_RECEIVED_ATAK_PLUGIN)
+        val filter = IntentFilter().apply {
+            addAction(MeshtasticIntent.ACTION_RECEIVED_ATAK_PLUGIN)
+            addAction(MeshtasticIntent.ACTION_RECEIVED_PRIVATE_APP)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(atakReceiver, filter, Context.RECEIVER_EXPORTED)
+            context.registerReceiver(meshReceiver, filter, Context.RECEIVER_EXPORTED)
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
-            context.registerReceiver(atakReceiver, filter)
+            context.registerReceiver(meshReceiver, filter)
         }
 
-        val intent = Intent().setClassName(
-            MESHTASTIC_PACKAGE,
-            "com.geeksville.mesh.service.MeshService",
-        )
+        // Bind by the stable intent-filter action, NOT a hardcoded class name.
+        // Meshtastic moved the service class com.geeksville.mesh.service.MeshService ->
+        // org.meshtastic.core.service.MeshService (seen on 2.7.14), but kept the action
+        // "com.geeksville.mesh.Service". Explicit setClassName silently fails to bind after
+        // the rename; the action survives across versions.
+        val intent = Intent(MESHTASTIC_SERVICE_ACTION).setPackage(MESHTASTIC_PACKAGE)
         val ok = context.bindService(intent, serviceConn, Context.BIND_AUTO_CREATE)
         if (!ok) {
             runCatching { context.unbindService(serviceConn) }
@@ -80,7 +94,7 @@ class MeshAidlClient(
     }
 
     fun stop() {
-        runCatching { context.unregisterReceiver(atakReceiver) }
+        runCatching { context.unregisterReceiver(meshReceiver) }
         if (bound) {
             runCatching { context.unbindService(serviceConn) }
             bound = false
@@ -107,8 +121,28 @@ class MeshAidlClient(
         }
     }
 
+    /** Отправить маяк выборов в меш на портнуме PRIVATE_APP (не виден ATAK-плагину). */
+    fun sendBeacon(bytes: ByteArray): Boolean {
+        val svc = service ?: return false
+        val data = DataPacket(
+            to = DataPacket.ID_BROADCAST,
+            bytes = bytes.toByteString(),
+            dataType = PortNum.PRIVATE_APP.value,
+        ).apply {
+            channel = 0
+            wantAck = false
+        }
+        return try {
+            svc.send(data)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     private companion object {
         const val MESHTASTIC_PACKAGE = "com.geeksville.mesh"
+        const val MESHTASTIC_SERVICE_ACTION = "com.geeksville.mesh.Service"
     }
 }
 

@@ -12,8 +12,11 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.dkashev.cotbridge.BridgeApp
 import com.dkashev.cotbridge.MainActivity
+import com.dkashev.cotbridge.bridge.Beacon
 import com.dkashev.cotbridge.bridge.BridgeStateHolder
 import com.dkashev.cotbridge.bridge.ConnectionState
+import com.dkashev.cotbridge.bridge.ElectionCore
+import com.dkashev.cotbridge.bridge.GatewayElector
 import com.dkashev.cotbridge.cot.AtakPacketConverter
 import com.dkashev.cotbridge.cot.AtakPacketConverter.callsign
 import com.dkashev.cotbridge.cot.CotXml
@@ -26,7 +29,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlin.random.Random
 import org.meshtastic.proto.TAKPacket
 
 class BridgeService : Service() {
@@ -37,27 +42,47 @@ class BridgeService : Service() {
     private var injector: AtakInjector? = null
     private var mesh: MeshAidlClient? = null
     private var fleet: UpstreamFleet? = null
+    private var elector: GatewayElector? = null
     private val loop = LoopDetector(capacity = 512)
     private var myCallsign: String = "Bridge"
+
+    @Volatile private var bridgeUp = false
+
+    private fun setShouldRun(v: Boolean) =
+        getSharedPreferences("bridge_svc", Context.MODE_PRIVATE).edit().putBoolean("should_run", v).apply()
+
+    private fun shouldRun(): Boolean =
+        getSharedPreferences("bridge_svc", Context.MODE_PRIVATE).getBoolean("should_run", false)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startBridge()
+            ACTION_START -> {
+                setShouldRun(true)
+                startBridge()
+            }
             ACTION_STOP -> {
+                setShouldRun(false)
                 stopBridge()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
+            // START_STICKY передоставляет НУ intent после того, как ОС убила процесс (агрессивный
+            // OEM-киллер энергосбережения). Раньше это игнорировалось → сервис жил, а мост не
+            // поднимался. Теперь поднимаем заново, если по флагу мы должны работать.
+            else -> if (shouldRun()) startBridge() else stopSelf()
         }
         return START_STICKY
     }
 
     private fun startBridge() {
+        if (bridgeUp) return // защита от двойного старта (повторный ACTION_START / гонка рестарта)
+        bridgeUp = true
         startForeground(NOTIF_ID, buildNotification("Запуск моста..."))
         BridgeStateHolder.update { it.copy(running = true, lastError = null) }
         BridgeStateHolder.log("Запуск bridge service")
+        BridgeStateHolder.log("Совет: исключи CoT Bridge из энергосбережения, иначе OEM убьёт сервис")
 
         scope.launch {
             try {
@@ -71,6 +96,9 @@ class BridgeService : Service() {
                 val meshClient = MeshAidlClient(
                     context = this@BridgeService,
                     onPacketReceived = ::onMeshPacket,
+                    onBeaconReceived = { bytes ->
+                        Beacon.decodeKey(bytes)?.let { key -> elector?.onBeacon(key) }
+                    },
                     onConnected = {
                         BridgeStateHolder.update { it.copy(localTak = ConnectionState.CONNECTED) }
                         BridgeStateHolder.log("Meshtastic AIDL: подключено")
@@ -116,6 +144,38 @@ class BridgeService : Service() {
                         BridgeStateHolder.log("URPC [$cs]: разрыв — ${err?.message ?: "EOF"}, переподключаюсь...")
                     },
                 ).also { it.start(scope, entries) }
+
+                // --- Выборы единственного активного шлюза (анти-дубль при раздаче друзьям) ---
+                var eid = cfg.electionId
+                if (eid == 0) {
+                    eid = Random.nextInt(1, Int.MAX_VALUE)
+                    BridgeApp.instance.preferences.update { it.copy(electionId = eid) }
+                }
+                val gw = GatewayElector(
+                    role = cfg.gatewayRole,
+                    myKey = ElectionCore.keyOf(cfg.gatewayPriority, eid),
+                    beaconIntervalMs = BEACON_INTERVAL_MS,
+                    timeoutMs = BEACON_TIMEOUT_MS,
+                    capable = {
+                        val meshUp = mesh?.connected == true
+                        val f = fleet
+                        val upstreamOk = f == null || f.count() == 0 || f.anyConnected()
+                        meshUp && upstreamOk
+                    },
+                    sendBeacon = { key -> mesh?.sendBeacon(Beacon.encode(key)) },
+                )
+                elector = gw
+                gw.start(scope)
+                scope.launch {
+                    gw.active.collect { active ->
+                        BridgeStateHolder.update {
+                            it.copy(gatewayActive = active, gatewayRole = cfg.gatewayRole.name)
+                        }
+                    }
+                }
+                BridgeStateHolder.log(
+                    "Роль шлюза: ${cfg.gatewayRole} (priority=${cfg.gatewayPriority}, id=$eid)"
+                )
             } catch (t: Throwable) {
                 BridgeStateHolder.update {
                     it.copy(running = false, lastError = t.message,
@@ -130,10 +190,13 @@ class BridgeService : Service() {
     }
 
     private fun stopBridge() {
+        bridgeUp = false
         multicast?.stop()
         multicast = null
         mesh?.stop()
         mesh = null
+        elector?.stop()
+        elector = null
         fleet?.stop()
         fleet = null
         injector?.close()
@@ -150,6 +213,10 @@ class BridgeService : Service() {
     /** ATAK → multicast 6969 → bridge → меш (входящие с URPC форвардим в меш). */
     private fun onAtakEvent(xml: String) {
         BridgeStateHolder.update { it.copy(rxFromAtak = it.rxFromAtak + 1) }
+        if (elector?.active?.value != true) {
+            BridgeStateHolder.update { it.copy(droppedStandby = it.droppedStandby + 1) }
+            return
+        }
         val key = keyOf(xml) ?: return
         if (loop.markAndCheck(key)) {
             BridgeStateHolder.update { it.copy(droppedLoop = it.droppedLoop + 1) }
@@ -163,6 +230,10 @@ class BridgeService : Service() {
     /** Меш → bridge → (либо UpstreamFleet под cert юзера, либо fallback маркер через ATAK). */
     private fun onMeshPacket(packet: TAKPacket) {
         BridgeStateHolder.update { it.copy(rxFromMesh = it.rxFromMesh + 1) }
+        if (elector?.active?.value != true) {
+            BridgeStateHolder.update { it.copy(droppedStandby = it.droppedStandby + 1) }
+            return
+        }
         val callsign = packet.callsign()
         val cot = AtakPacketConverter.takPacketToCot(packet) ?: return
         val key = keyOf(cot) ?: return
@@ -183,6 +254,8 @@ class BridgeService : Service() {
                 packet.chat != null -> AtakPacketConverter.takPacketToPrefixedChatCot(packet, myCallsign)
                 else -> null
             } ?: return
+            // Пометим UID инжектнутого CoT, чтобы его мультикаст-эхо от ATAK не улетело назад в меш.
+            keyOf(fallbackCot)?.let { loop.markAndCheck(it) }
             val ok = injector?.send(fallbackCot) ?: false
             if (ok) {
                 BridgeStateHolder.update { it.copy(txFallback = it.txFallback + 1, txToAtak = it.txToAtak + 1) }
@@ -264,6 +337,10 @@ class BridgeService : Service() {
         private const val NOTIF_ID = 1
         private const val NOTIF_MISSING_BASE = 100
         private const val CHANNEL_FALLBACK = "cotbridge_fallback"
+
+        // Маяк выборов раз в 30с; standby занимает вакансию, если не слышал активный маяк ~95с.
+        private const val BEACON_INTERVAL_MS = 30_000L
+        private const val BEACON_TIMEOUT_MS = 95_000L
 
         fun start(ctx: Context) {
             val intent = Intent(ctx, BridgeService::class.java).setAction(ACTION_START)

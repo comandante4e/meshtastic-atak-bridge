@@ -19,6 +19,12 @@ data class BridgeState(
     val txToUpstream: Long = 0,
     val txFallback: Long = 0,
     val droppedLoop: Long = 0,
+    /** Ретрансляция пропущена, потому что этот инстанс сейчас не активный шлюз (standby/off). */
+    val droppedStandby: Long = 0,
+    /** Роль шлюза (OFF/AUTO/FORCE) как строка для UI. */
+    val gatewayRole: String = "AUTO",
+    /** Этот инстанс сейчас активный шлюз (ретранслирует). */
+    val gatewayActive: Boolean = false,
     val upstreams: Map<String, ConnectionState> = emptyMap(),
     val log: List<LogEntry> = emptyList(),
     val lastError: String? = null,
