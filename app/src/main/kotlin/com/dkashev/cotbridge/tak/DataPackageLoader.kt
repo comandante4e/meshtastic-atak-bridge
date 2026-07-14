@@ -43,12 +43,12 @@ object DataPackageLoader {
             ?.value
 
         val keyStore = loadKeyStore(clientP12, password)
-        val trustStore = trustP12?.let { loadKeyStore(it, password) } ?: keyStore
+        val trustSource = trustP12?.let { loadKeyStore(it, password) } ?: keyStore
 
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
             .apply { init(keyStore, password) }
         val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
-            .apply { init(trustStore) }
+            .apply { init(buildTrustStore(trustSource, keyStore)) }
         val ssl = SSLContext.getInstance("TLS").apply {
             init(kmf.keyManagers, tmf.trustManagers, java.security.SecureRandom())
         }
@@ -59,6 +59,34 @@ object DataPackageLoader {
             ?.value?.let(::parsePrefXml) ?: (null to null)
 
         return Parsed(ssl, cn, host, port)
+    }
+
+    /**
+     * Собирает trust-store из ВСЕХ читаемых X509-сертов (standalone-записи + цепочки
+     * key-entry'ей) переданных keystore'ов.
+     *
+     * Зачем: дефолтный Android-провайдер PKCS12 НЕ отдаёт trustedCertEntry (ни из
+     * keytool с Oracle-атрибутом, ни из openssl cert-bag'ов) как isCertificateEntry —
+     * поэтому TrustManagerFactory.init(pkcs12) даёт 0 якорей и рушится с
+     * CertPathValidatorException «Trust anchor for certification path not found».
+     * Зато цепочку сертификатов key-entry'я (клиентский .p12) провайдер читает всегда,
+     * а в ней лежит CA. Пересобираем явный in-memory trust-store через
+     * setCertificateEntry (канонический Android-паттерн «доверять своему CA»).
+     */
+    private fun buildTrustStore(vararg sources: KeyStore): KeyStore {
+        val anchors = LinkedHashSet<X509Certificate>()
+        for (ks in sources) {
+            for (alias in ks.aliases()) {
+                (ks.getCertificate(alias) as? X509Certificate)?.let(anchors::add)
+                ks.getCertificateChain(alias)?.forEach { c ->
+                    (c as? X509Certificate)?.let(anchors::add)
+                }
+            }
+        }
+        return KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+            load(null, null)
+            anchors.forEachIndexed { i, cert -> setCertificateEntry("anchor$i", cert) }
+        }
     }
 
     private fun isClientP12(name: String): Boolean {
