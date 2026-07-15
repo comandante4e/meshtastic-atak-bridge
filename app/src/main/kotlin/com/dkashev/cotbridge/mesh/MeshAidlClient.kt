@@ -12,6 +12,7 @@ import okio.ByteString.Companion.toByteString
 import org.meshtastic.core.api.MeshtasticIntent
 import org.meshtastic.core.model.DataPacket
 import org.meshtastic.core.service.IMeshService
+import org.meshtastic.proto.ChannelSet
 import org.meshtastic.proto.PortNum
 import org.meshtastic.proto.TAKPacket
 
@@ -118,6 +119,40 @@ class MeshAidlClient(
             true
         } catch (_: Throwable) {
             false
+        }
+    }
+
+    /**
+     * Радио-параметры ноды (пресет либо кастомные SF/BW/CR) — из них считается бюджет эфира
+     * под обратку. `null`, если нода не подключена или конфиг не читается: тогда зовущий
+     * должен взять [LoraParams.DEFAULT] (LONG_FAST — дефолт прошивки и самый узкий из ходовых).
+     */
+    fun loraRadio(): LoraParams.Radio? {
+        val svc = service ?: return null
+        val cfg = try {
+            ChannelSet.ADAPTER.decode(svc.getChannelSet() ?: return null).lora_config
+        } catch (_: Throwable) {
+            null
+        } ?: return null
+
+        if (cfg.use_preset) return LoraParams.byPresetName(cfg.modem_preset.name)
+
+        // Кастомная модуляция: доверяем только правдоподобным значениям.
+        val sf = cfg.spread_factor
+        val bw = LoraParams.bandwidthFromProto(cfg.bandwidth)
+        val cr = cfg.coding_rate
+        if (sf !in 7..12 || bw <= 0.0 || cr !in 5..8) return null
+        return LoraParams.Radio(sf, bw, cr)
+    }
+
+    /** Имя пресета ноды для UI/лога («LONG_FAST», «CUSTOM», null — не прочитали). */
+    fun loraPresetName(): String? {
+        val svc = service ?: return null
+        return try {
+            val cfg = ChannelSet.ADAPTER.decode(svc.getChannelSet() ?: return null).lora_config
+            if (cfg?.use_preset == true) cfg.modem_preset.name else if (cfg != null) "CUSTOM" else null
+        } catch (_: Throwable) {
+            null
         }
     }
 

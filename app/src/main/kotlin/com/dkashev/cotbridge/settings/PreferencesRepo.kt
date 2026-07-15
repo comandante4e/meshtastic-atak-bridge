@@ -27,6 +27,12 @@ data class BridgeConfig(
     val electionId: Int = 0,
     /** Как гнать обратку URPC→меш. По умолчанию надёжный RX из UpstreamFleet. */
     val serverRelayMode: ServerRelayMode = ServerRelayMode.UPSTREAM_RX,
+    /**
+     * Порог движения для обратки, метры: позицию в меш не шлём, пока контакт не сдвинулся
+     * на столько. Стоящий игрок = нулевой трафик. Раз в 5 минут позиция уходит всё равно,
+     * чтобы контакт не протух на карте.
+     */
+    val movementThresholdM: Int = 50,
 )
 
 class PreferencesRepo(private val context: Context) {
@@ -46,6 +52,7 @@ class PreferencesRepo(private val context: Context) {
             p[KEY_GW_PRIORITY] = updated.gatewayPriority
             p[KEY_ELECTION_ID] = updated.electionId
             p[KEY_SERVER_RELAY] = updated.serverRelayMode.name
+            p[KEY_MOVE_THRESHOLD] = updated.movementThresholdM
         }
     }
 
@@ -60,6 +67,7 @@ class PreferencesRepo(private val context: Context) {
         electionId = p[KEY_ELECTION_ID] ?: 0,
         serverRelayMode = p[KEY_SERVER_RELAY]?.let { runCatching { ServerRelayMode.valueOf(it) }.getOrNull() }
             ?: ServerRelayMode.UPSTREAM_RX,
+        movementThresholdM = p[KEY_MOVE_THRESHOLD] ?: 50,
     )
 
     private companion object {
@@ -71,5 +79,6 @@ class PreferencesRepo(private val context: Context) {
         val KEY_GW_PRIORITY = intPreferencesKey("gateway_priority")
         val KEY_ELECTION_ID = intPreferencesKey("election_id")
         val KEY_SERVER_RELAY = stringPreferencesKey("server_relay_mode")
+        val KEY_MOVE_THRESHOLD = intPreferencesKey("movement_threshold_m")
     }
 }

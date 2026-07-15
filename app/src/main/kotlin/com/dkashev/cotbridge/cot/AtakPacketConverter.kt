@@ -142,6 +142,17 @@ object AtakPacketConverter {
     /** Callsign из `<contact callsign="...">` серверного CoT (для фильтра эха обратки). */
     fun callsignFromCot(xml: String): String? = extractCallsign(xml)
 
+    /** PLI (позиция) — в отличие от чата подчиняется порогу движения и коалесcингу. */
+    fun isPliCot(xml: String): Boolean =
+        CotXml.extractType(xml)?.let(::isPliType) ?: false
+
+    /** Координаты из `<point/>`, если есть. */
+    fun pointFromCot(xml: String): Pair<Double, Double>? {
+        val lat = extractPointAttr(xml, "lat") ?: return null
+        val lon = extractPointAttr(xml, "lon") ?: return null
+        return lat to lon
+    }
+
     fun TAKPacket.callsign(): String = contact?.callsign?.ifEmpty { null } ?: "Mesh"
     private fun TAKPacket.teamName(): String = group?.team?.name?.replace("_", " ") ?: "Cyan"
     private fun TAKPacket.roleString(): String = group?.role?.let(::roleString) ?: "Team Member"

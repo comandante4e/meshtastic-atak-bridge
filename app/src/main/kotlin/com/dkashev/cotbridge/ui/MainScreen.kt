@@ -26,6 +26,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -222,6 +223,18 @@ private fun CountersCard(state: BridgeState) {
             Text("bridge → ATAK (fallback маркер): ${state.txFallback}")
             Text("Эхо-фильтр: ${state.droppedLoop}", fontSize = 12.sp, color = Color.Gray)
             Text("Пропущено (не активный шлюз): ${state.droppedStandby}", fontSize = 12.sp, color = Color.Gray)
+            HorizontalDivider(Modifier.padding(vertical = 2.dp))
+            Text(
+                "Обратка (бюджет эфира ${state.obratkaBudget} пкт/мин" +
+                    (state.meshPreset?.let { " · пресет $it" } ?: " · пресет не прочитан") + ")",
+                fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "ждёт эфира: ${state.throttlePending} · " +
+                    "подавлено (стоит на месте): ${state.throttleStill} · " +
+                    "схлопнуто: ${state.throttleCoalesced}",
+                fontSize = 12.sp, color = Color.Gray,
+            )
         }
     }
 }
@@ -463,6 +476,23 @@ private fun ConfigCard(
             Text(
                 "RX — надёжно, напрямую из per-cert стримов (реком.). " +
                     "Multicast — через ретрансляцию ATAK (запасной). Применяется при след. Старте.",
+                fontSize = 11.sp, color = Color.Gray,
+            )
+
+            var moveThr by remember(cfg) { mutableStateOf(cfg.movementThresholdM.toString()) }
+            OutlinedTextField(
+                value = moveThr,
+                onValueChange = {
+                    moveThr = it.filter(Char::isDigit)
+                    onCfgChange { c -> c.copy(movementThresholdM = moveThr.toIntOrNull() ?: 50) }
+                },
+                label = { Text("Порог движения, м (позицию не шлём, пока контакт не сдвинулся)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "LoRa не тянет поток сервера: бюджет эфира считается автоматически из пресета ноды " +
+                    "и делится между всеми контактами. Стоящий контакт трафика не ест (раз в 5 мин " +
+                    "освежается, чтобы не протух). Чат идёт вперёд позиций.",
                 fontSize = 11.sp, color = Color.Gray,
             )
         }

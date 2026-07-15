@@ -17,12 +17,14 @@ import com.dkashev.cotbridge.bridge.BridgeStateHolder
 import com.dkashev.cotbridge.bridge.ConnectionState
 import com.dkashev.cotbridge.bridge.ElectionCore
 import com.dkashev.cotbridge.bridge.GatewayElector
+import com.dkashev.cotbridge.bridge.ObratkaThrottle
 import com.dkashev.cotbridge.bridge.ServerRelayMode
 import com.dkashev.cotbridge.bridge.TtlSet
 import com.dkashev.cotbridge.cot.AtakPacketConverter
 import com.dkashev.cotbridge.cot.AtakPacketConverter.callsign
 import com.dkashev.cotbridge.cot.CotXml
 import com.dkashev.cotbridge.cot.LoopDetector
+import com.dkashev.cotbridge.mesh.LoraParams
 import com.dkashev.cotbridge.mesh.MeshAidlClient
 import com.dkashev.cotbridge.net.AtakInjector
 import com.dkashev.cotbridge.net.AtakMulticastListener
@@ -31,7 +33,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.random.Random
 import org.meshtastic.proto.TAKPacket
@@ -51,6 +55,20 @@ class BridgeService : Service() {
     /** Callsign'ы, что мы форвардим С меша НА URPC — для фильтра эха обратки (URPC ремапит uid). */
     private val meshCallsigns = TtlSet(MESH_CALLSIGN_TTL_MS)
     private var serverRelayMode: ServerRelayMode = ServerRelayMode.UPSTREAM_RX
+
+    /**
+     * Обратка сервер→меш идёт не напрямую в эфир, а через троттл: LoRa физически не тянет
+     * поток TAK-сервера (на LONG_FAST потолок ~9 пкт/мин на всю сеть). Бюджет считается из
+     * пресета ноды, порог движения — из настроек.
+     */
+    @Volatile private var obratkaBudget = LoraParams.budgetPktPerMin(LoraParams.DEFAULT)
+    @Volatile private var movementThresholdM = 50
+    private var meshPreset: String? = null
+    private val throttle = ObratkaThrottle<TAKPacket>(
+        budgetPerMin = { obratkaBudget },
+        movementThresholdM = { movementThresholdM },
+        now = { System.currentTimeMillis() },
+    )
 
     @Volatile private var bridgeUp = false
 
@@ -95,6 +113,7 @@ class BridgeService : Service() {
                 val cfg = BridgeApp.instance.preferences.current()
                 myCallsign = cfg.myCallsign
                 serverRelayMode = cfg.serverRelayMode
+                movementThresholdM = cfg.movementThresholdM
 
                 injector = AtakInjector(host = "127.0.0.1", port = cfg.atakInputPort)
                 BridgeStateHolder.log("Инжектор готов: UDP 127.0.0.1:${cfg.atakInputPort}")
@@ -173,6 +192,7 @@ class BridgeService : Service() {
                 )
                 elector = gw
                 gw.start(scope)
+                startObratkaPump(scope)
                 scope.launch {
                     gw.active.collect { active ->
                         BridgeStateHolder.update {
@@ -297,8 +317,52 @@ class BridgeService : Service() {
             return
         }
         val tak = AtakPacketConverter.cotToTakPacket(xml) ?: return
-        val sent = mesh?.send(tak) ?: false
-        if (sent) BridgeStateHolder.update { it.copy(txToMesh = it.txToMesh + 1) }
+        // Не в эфир напрямую, а в троттл: сервер может сыпать быстрее, чем LoRa физически тянет.
+        val uid = CotXml.extractUid(xml)
+        val point = AtakPacketConverter.pointFromCot(xml)
+        if (uid != null && point != null && AtakPacketConverter.isPliCot(xml)) {
+            throttle.offerPosition(uid, point.first, point.second, tak)
+        } else {
+            // Чат/тревога — вперёд очереди и мимо порога движения.
+            throttle.offerChat(tak)
+        }
+    }
+
+    /**
+     * Насос обратки: сливает троттл в меш по мере того, как бюджет эфира это позволяет.
+     * Заодно подтягивает пресет ноды — он появляется не сразу после старта.
+     */
+    private fun startObratkaPump(scope: CoroutineScope) = scope.launch {
+        while (isActive) {
+            refreshRadioBudget()
+            var packet = throttle.poll()
+            while (packet != null) {
+                if (mesh?.send(packet) == true) {
+                    BridgeStateHolder.update { it.copy(txToMesh = it.txToMesh + 1) }
+                }
+                packet = throttle.poll()
+            }
+            BridgeStateHolder.update {
+                it.copy(
+                    throttleStill = throttle.suppressedStill.toLong(),
+                    throttleCoalesced = throttle.coalesced.toLong(),
+                    throttlePending = throttle.pendingCount,
+                )
+            }
+            delay(PUMP_INTERVAL_MS)
+        }
+    }
+
+    /** Бюджет обратки = функция пресета ноды. Пресет меняют редко — просто перечитываем. */
+    private fun refreshRadioBudget() {
+        val name = mesh?.loraPresetName()
+        val budget = LoraParams.budgetPktPerMin(mesh?.loraRadio() ?: LoraParams.DEFAULT)
+        if (name == meshPreset && budget == obratkaBudget) return
+        meshPreset = name
+        obratkaBudget = budget
+        BridgeStateHolder.update { it.copy(meshPreset = name, obratkaBudget = budget) }
+        val shown = name ?: "не прочитан, считаю как ${LoraParams.DEFAULT_NAME}"
+        BridgeStateHolder.log("Пресет ноды: $shown → бюджет обратки $budget пкт/мин")
     }
 
     private fun keyOf(xml: String): String? {
@@ -373,6 +437,8 @@ class BridgeService : Service() {
         private const val CHANNEL_FALLBACK = "cotbridge_fallback"
 
         // Маяк выборов раз в 30с; standby занимает вакансию, если не слышал активный маяк ~95с.
+        /** Как часто сливаем троттл в эфир. Чаще смысла нет: бюджет — единицы пкт/мин. */
+        private const val PUMP_INTERVAL_MS = 1_000L
         private const val BEACON_INTERVAL_MS = 30_000L
         private const val BEACON_TIMEOUT_MS = 95_000L
 

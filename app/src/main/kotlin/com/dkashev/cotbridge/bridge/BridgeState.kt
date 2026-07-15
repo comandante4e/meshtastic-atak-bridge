@@ -25,6 +25,16 @@ data class BridgeState(
     val gatewayRole: String = "AUTO",
     /** Этот инстанс сейчас активный шлюз (ретранслирует). */
     val gatewayActive: Boolean = false,
+    /** Пресет ноды («LONG_FAST»/«CUSTOM»); null — не прочитан, бюджет считаем как LONG_FAST. */
+    val meshPreset: String? = null,
+    /** Бюджет обратки сервер→меш, пкт/мин. Считается из пресета ноды. */
+    val obratkaBudget: Int = 0,
+    /** Позиций подавлено порогом движения (контакт стоит на месте). */
+    val throttleStill: Long = 0,
+    /** Позиций схлопнуто коалесcингом (перезаписаны свежими, не доехав до эфира). */
+    val throttleCoalesced: Long = 0,
+    /** Сейчас ждёт эфира. */
+    val throttlePending: Int = 0,
     val upstreams: Map<String, ConnectionState> = emptyMap(),
     val log: List<LogEntry> = emptyList(),
     val lastError: String? = null,
